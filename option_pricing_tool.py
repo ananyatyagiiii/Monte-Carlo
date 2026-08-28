@@ -40,33 +40,51 @@ def black_scholes_call(S0, K, T, r, sigma):
  
     return call_price
  
-def calculate_option_price(initial_price, strike_price, volatility, days, simulations, r, T, option_type='call'):
-    # One simulation step = one slice of T, so the step size and T agree.
-    # (Using 252 here while T is measured in 365-day years inflates volatility
-    # by sqrt(365/252) = 1.20x, which is why prices used to run ~20% hot.)
+def simulate_terminal_prices(initial_price, volatility, simulations, r, T):
+    """Exact terminal-price distribution under risk-neutral GBM.
+
+    A European payoff only depends on where the price ends up, not how it
+    got there, and under GBM the terminal log-price is exactly Normal
+    with mean (r - 0.5*sigma**2)*T and variance sigma**2*T -- a sum of any
+    number of smaller steps has that same distribution, so drawing one
+    macro step per simulation is not an approximation, it's the exact
+    answer, and it needs no day-by-day loop at all.
+
+    This also can't send a price negative and carries no discretisation
+    bias to average away, unlike stepping the *simple* return as if it
+    were normal (price *= (1 + N(...))), which is what this function
+    replaced.
+    """
+    z = np.random.normal(size=simulations)
+    return initial_price * np.exp((r - 0.5 * volatility**2) * T + volatility * np.sqrt(T) * z)
+
+
+def simulate_one_path(initial_price, volatility, days, r, T):
+    """One day-by-day sample path, for the "sample paths" plot only --
+    pricing uses simulate_terminal_prices() and never needs this."""
     dt = T / days
-    daily_volatility = volatility * np.sqrt(dt)
- 
-    payoffs = []
-    for sim in range(simulations):
-        price = initial_price
-        prices = [price]
-        for day in range(days):
-            daily_return_mean = r * dt  # Convert annual rate to one step
-            daily_return_std = daily_volatility  # ← Use daily, not annual
-            random_return = np.random.normal(daily_return_mean, daily_return_std)
-            price *= (1 + random_return)
-            prices.append(price)
-        final_price = prices[-1]
-        if option_type == 'call':
-            payoff = max(final_price - strike_price, 0)
-        elif option_type == 'put':
-            payoff = max(strike_price - final_price, 0)  # ← Note: strike FIRST
-        else:
-            raise ValueError("option_type must be 'call' or 'put'")
-        payoffs.append(payoff)
+    z = np.random.normal(size=days)
+    log_step = (r - 0.5 * volatility**2) * dt + volatility * np.sqrt(dt) * z
+    log_path = np.cumsum(log_step)
+    return initial_price * np.exp(np.concatenate([[0.0], log_path]))
+
+
+def calculate_option_price(initial_price, strike_price, volatility, days, simulations, r, T, option_type='call'):
+    final_prices = simulate_terminal_prices(initial_price, volatility, simulations, r, T)
+
+    if option_type == 'call':
+        payoffs = np.maximum(final_prices - strike_price, 0)
+    elif option_type == 'put':
+        payoffs = np.maximum(strike_price - final_prices, 0)
+    else:
+        raise ValueError("option_type must be 'call' or 'put'")
+
     option_price = np.mean(payoffs) * np.exp(-r * T)
-    return option_price, prices
+    # A day-stepped sample path, purely for the "sample paths" plot -- the
+    # price above comes from `simulations` independent terminal draws, not
+    # from stepping through this (or any) single path.
+    path = simulate_one_path(initial_price, volatility, days, r, T)
+    return option_price, path.tolist()
  
  
 # ============================================================================
@@ -194,9 +212,14 @@ if __name__ == "__main__":
     ax4.grid(True, alpha=0.3)
  
     # Plot 5: Distribution of Final Prices (bottom-left)
+    # calculate_option_price only returns one representative path (see its
+    # docstring), so the actual spread of outcomes is re-simulated here from
+    # every path, not read off the single path each result carries.
     ax5 = fig.add_subplot(gs[2, 0])
-    final_prices_low = result1[1][-1]
-    ax5.hist([result1[1][-1], result2[1][-1], result3[1][-1]],
+    final_prices_low = simulate_terminal_prices(initial_price, vol_low, simulations, r, T)
+    final_prices_medium = simulate_terminal_prices(initial_price, vol_medium, simulations, r, T)
+    final_prices_high = simulate_terminal_prices(initial_price, vol_high, simulations, r, T)
+    ax5.hist([final_prices_low, final_prices_medium, final_prices_high],
              bins=30, alpha=0.6, label=['Vol 5%', 'Vol 15%', 'Vol 30%'], edgecolor='black')
     ax5.axvline(strike_price, color='red', linestyle='--', linewidth=2, label='Strike')
     ax5.axvline(initial_price, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Current')
